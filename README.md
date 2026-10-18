@@ -91,7 +91,8 @@ git push -u origin main
 - 触发：push `main`、push tag `v*`、PR（**只构建不推送**）、每周一 03:00 定时重建、手动 `workflow_dispatch`。
 - 手动触发可临时覆盖：`caddy_version`（如 `2.11.7`）、`plugins`（空格分隔，如 `github.com/mholt/caddy-webdav`）、`push_image`。
 - 镜像标签：`latest` + `caddy-<版本>`（默认分支）、分支名、git tag、`sha-xxxxxxx`；多架构 `linux/amd64,linux/arm64`。
-- `verify` job：拉镜像跑 `caddy list-modules` 断言三个模块存在、`caddy validate` 断言 Caddyfile 能加载（即 `trusted_proxies cloudflare` 真的生效），并把 `caddy-linux-amd64` 作为 artifact 上传（可手动下载到服务器用）。
+- `verify` job：拉镜像跑 `caddy list-modules` 断言四个模块存在、`caddy validate` 断言 Caddyfile 能加载（即 `trusted_proxies union{cloudflare+private_ranges}` 真的生效），并把 `caddy-linux-amd64` 作为 artifact 上传（可手动下载到服务器用）。
+- Actions 版本已跟到 **node24 世代**（消掉 Node.js 20 deprecated 警告）：`checkout@v7`、`setup-qemu@v4`、`setup-buildx@v4`、`metadata@v6`、`login@v4`、`build-push@v7`、`upload-artifact@v7`；`runs-on` 固定 **`ubuntu-24.04`**（避开 `ubuntu-latest` 迁 Ubuntu 26 的变动）。
 - 想同时推 GHCR：放开 `permissions.packages: write` 和 `build` 里注释的 GHCR 段。
 - 老版本 Docker 拉镜像报 `unknown manifest type` 时，把 `build-push-action` 的 `provenance` 改 `false`。
 - arm64 是 QEMU 模拟编译，比较慢；只要 amd64 就把 `env.PLATFORMS` 改成 `linux/amd64`。
