@@ -10,6 +10,9 @@ ARG CADDY_VERSION=2.11.7
 FROM caddy:${CADDY_VERSION}-builder AS builder
 
 # builder 镜像已内置：xcaddy、WORKDIR=/usr/bin、ENV XCADDY_SETCAP=1、ENV CADDY_VERSION=vX.Y.Z
+# 仓库内自带的本地插件（plugins.txt 里写成 pkg=相对路径 的会被 xcaddy 当成 replace）
+COPY plugins /src/plugins
+
 ARG CADDY_VERSION
 # 空格分隔的插件列表（pkg 或 pkg@version），由 CI 从 plugins.txt 生成
 ARG CADDY_PLUGINS=""

@@ -1,4 +1,5 @@
 # 每行一个插件，支持 pkg 或 pkg@<version|commit|branch>
+# 仓库内本地插件写 pkg=相对路径（例：github.com/ludb68/my_caddy/plugins/ipunion=plugins/ipunion）
 # 空行、以 # 开头的行会被忽略；行尾 # 注释也会被去掉
 # 改完这里，Dockerfile / GitHub Action 会自动用它去 xcaddy build，无需改其他文件
 
@@ -13,3 +14,8 @@ github.com/WeidiDeng/caddy-cloudflare-ip@f53b62a
 
 # ---- 限流（可选，不需要就删掉这行）----
 github.com/mholt/caddy-ratelimit
+
+# ---- 仓库内自带的本地插件（写法 pkg=相对路径，CI 会映射成容器内 /src/<路径>）----
+# http.ip_sources.union：把多个 IP 源合并成一个，解决 trusted_proxies 只能单源的限制
+#   trusted_proxies union { source cloudflare { ... } source static private_ranges }
+github.com/ludb68/my_caddy/plugins/ipunion=plugins/ipunion

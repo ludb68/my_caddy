@@ -8,6 +8,7 @@
 | `github.com/caddy-dns/cloudflare` | `dns.providers.cloudflare` | Cloudflare DNS-01 签证书（支持通配符，不用暴露 80 端口） |
 | `github.com/WeidiDeng/caddy-cloudflare-ip` @`f53b62a` | `http.ip_sources.cloudflare` | 自动拉 CF 官方 IP 段当 `trusted_proxies`，日志/`client_ip` 拿到访客真实 IP |
 | `github.com/mholt/caddy-ratelimit` | `http.handlers.rate_limit` | 限流（不需要就从 `plugins.txt` 删掉） |
+| **本仓库内置** `plugins/ipunion` | `http.ip_sources.union` | 把多个 IP 源**合并**成一个：CF 动态段 + 内网静态段塞进同一个 `trusted_proxies` |
 
 ## 文件结构
 
@@ -15,8 +16,9 @@
 .
 ├── .github/workflows/build.yml   # CI：解析参数 → buildx 多架构构建 → 推 Docker Hub → 校验产物
 ├── Dockerfile                    # 两阶段：caddy:<ver>-builder 里 xcaddy 编译；caddy:<ver> 里运行
-├── plugins.txt                   # 插件清单（每行一个，支持 pkg@version / @commit）
-├── Caddyfile                     # 默认配置：trusted_proxies cloudflare + :80 健康检查
+├── plugins.txt                   # 插件清单（每行一个，支持 pkg@version / @commit / pkg=本地路径）
+├── plugins/ipunion/              # 仓库自带的本地 Caddy 插件：http.ip_sources.union（多源合并）
+├── Caddyfile                     # 默认配置：trusted_proxies union{cloudflare + private_ranges} + :80 健康检查
 └── .dockerignore / .gitignore
 ```
 
@@ -67,7 +69,7 @@ pwsh -File secrets/apply-secrets.ps1 -Open                     # 打开仓库 Se
 
 ### 想完全零凭据（只做 trusted proxies）
 
-把 `plugins.txt` 里 `github.com/caddy-dns/cloudflare` 和 `github.com/mholt/caddy-ratelimit` 两行删掉 → 运行时不需要任何 token；同时把仓库 Variable `EXPECT_MODULES` 改成 `http.ip_sources.cloudflare`（CI 用它断言模块存在，不配默认断言三个）。
+把 `plugins.txt` 里 `github.com/caddy-dns/cloudflare` 和 `github.com/mholt/caddy-ratelimit` 两行删掉 → 运行时不需要任何 token；同时把仓库 Variable `EXPECT_MODULES` 改成 `http.ip_sources.cloudflare http.ip_sources.union`（CI 用它断言模块存在，不配默认断言四个）。
 
 ## 一次性配置
 
@@ -97,15 +99,16 @@ git push -u origin main
 ## 本地复现（和 CI 完全一样的命令）
 
 ```bash
-# 编译（Linux 二进制）
+# 编译（Linux 二进制）—— 最后一个 --with 是本仓库的本地插件（路径换成你自己机器上的绝对路径）
 xcaddy build v2.11.7 \
   --with github.com/caddy-dns/cloudflare \
   --with github.com/WeidiDeng/caddy-cloudflare-ip@f53b62a \
-  --with github.com/mholt/caddy-ratelimit
+  --with github.com/mholt/caddy-ratelimit \
+  --with "github.com/ludb68/my_caddy/plugins/ipunion=D:/Sync/IdeaProjects/my_caddy/plugins/ipunion"
 
-# 起 Docker 镜像
+# 起 Docker 镜像（本地插件用容器内路径 /src/plugins/ipunion）
 docker build --build-arg CADDY_VERSION=2.11.7 \
-  --build-arg CADDY_PLUGINS="github.com/caddy-dns/cloudflare github.com/WeidiDeng/caddy-cloudflare-ip@f53b62a github.com/mholt/caddy-ratelimit" \
+  --build-arg CADDY_PLUGINS="github.com/caddy-dns/cloudflare github.com/WeidiDeng/caddy-cloudflare-ip@f53b62a github.com/mholt/caddy-ratelimit github.com/ludb68/my_caddy/plugins/ipunion=/src/plugins/ipunion" \
   -t caddy-custom:local .
 docker run --rm -p 80:80 -p 443:443 -e CF_API_TOKEN=xxx caddy-custom:local
 ```
@@ -140,43 +143,63 @@ volumes:
 
 > 注意：`remote_ip` / `client_ip` 匹配器**只吃静态 CIDR，不支持模块名，也不支持块语法**（所有 CIDR 写在同一行）；动态 IP 源只作用于 `trusted_proxies`（即 `{http.request.remote.host}` / 日志 / `reverse_proxy` 的上游真实 IP）。
 
-### ⚠ 一个 server 只能配一个 `trusted_proxies` 源（踩坑高发点）
+### 如何组合多个 `trusted_proxies`（单源限制的解法）
 
-Caddy 里 `trusted_proxies` 是 `inline_key=source` 的单模块字段 —— **不能同时写 "CF 段 + 内网段" 两个源**。如果 Caddy 前面还有一层反代/负载均衡（典型：Docker Swarm 用 ingress 发布端口时，回源源 IP 会变成 `10.0.0.2`），那 peer IP 不在 CF 段里 → Caddy 判定连接不可信 → **真实 IP 又丢成 10.0.0.2**。两个解法：
+Caddy 里 `trusted_proxies` 是 `inline_key=source` 的**单模块字段** —— 一个 server 只能配一个 `http.ip_sources.*` 源，写两个会被当成重复选项。而实际部署经常需要同时信任：
 
-1. **保住真实源 IP（推荐）**：Swarm 里用 host 模式发布端口，绕过 ingress 网络：
+- **Cloudflare 官方段**（动态，插件 `WeidiDeng/caddy-cloudflare-ip`）
+- **局域网 / 容器网段**（静态；典型：Docker Swarm 用 ingress 发布端口时回源源 IP 会变成 `10.0.0.2`，只有 CF 段的话 peer IP 不可信 → 真实 IP 丢成 `10.0.0.2`）
 
-   ```yaml
-   ports:
-     - { target: 80,  published: 80,  mode: host }
-     - { target: 443, published: 443, mode: host }
-     - { target: 443, published: 443, mode: host, protocol: udp }
-   ```
+四种可控解法，按推荐度排：
 
-   这样 peer IP 就是 CF 边缘节点 IP，`trusted_proxies cloudflare` 直接生效。
+| # | 做法 | 优点 | 代价 |
+|---|---|---|---|
+| ① | **`union` 模块**（本仓库自带，`http.ip_sources.union`）：`trusted_proxies union { source cloudflare {...} source static private_ranges }` | 动态 + 静态真正合并、自动去重，不用手维护 CF 段 | 多一个模块（已在镜像里） |
+| ② | 改拓扑：Swarm 用 `mode: host` 发布端口，绕过 ingress | 最干净，只需信任 CF | 端口不能多副本负载均衡 |
+| ③ | 单个 `static` 并集：`trusted_proxies static private_ranges <CF 段...>` | 零插件 | CF 换段要手改；CIDR 必须写在同一行 |
+| ④ | 换成 `monobilisim/caddy-ip-list` 或用 `iptables` 在宿主机限 CF 源 | — | 仍需额外配置 |
 
-2. **改用 static 并集**（CF 段 + `10.0.0.0/8`），代价是 CF 换段要手动更新（CF 段极少变）。Caddyfile 里已写好这行注释，取消注释即可（`static` 同样不接受块语法，必须一整行）。
+`private_ranges` 关键字展开为：`192.168.0.0/16`、`172.16.0.0/12`（含 Docker 默认桥 `172.17/16`）、`10.0.0.0/8`、`127.0.0.1/8`、`fd00::/8`、`::1`。
 
-   当前 CF 官方网段（2026-10-18 实拉 <https://www.cloudflare.com/ips-v4> + `/ips-v6>`）：
+union 的 JSON 等价写法（`http.ip_sources.union` 的 `sources` 字段就是子模块列表）：
 
-   ```
-   173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 141.101.64.0/18
-   108.162.192.0/18 190.93.240.0/20 188.114.96.0/20 197.234.240.0/22 198.41.128.0/17
-   162.158.0.0/15 104.16.0.0/13 104.24.0.0/14 172.64.0.0/13 131.0.72.0/22
-   2400:cb00::/32 2606:4700::/32 2803:f800::/32 2405:b500::/32 2405:8100::/32
-   2a06:98c0::/29 2c0f:f248::/32
-   ```
+```json
+"trusted_proxies": {
+  "source": "union",
+  "sources": [
+    {"source": "cloudflare", "interval": 21600000000000, "timeout": 10000000000},
+    {"source": "static", "ranges": ["192.168.0.0/16", "172.16.0.0/12", "10.0.0.0/8", "127.0.0.1/8", "fd00::/8", "::1"]}
+  ]
+}
+```
+
+> ⚠ **安全**：信任内网段 = 内网里任何东西都能伪造 `X-Forwarded-For`（影响日志、限流、`client_ip` 匹配）。因此：
+> 1. 建议开 `trusted_proxies_strict`：开启后 Caddy 要求 XFF 链路严格可回退，伪造会直接忽略/报错；
+> 2. 确保只有 CF 能连到 443（你那边已有 `iptables DOCKER-USER` 按 CF 段放行）；
+> 3. 能改拓扑就用 `mode: host`（方案 ②），连内网段都不用信任。
+
+### 本地插件怎么进镜像
+
+`plugins.txt` 里写 `pkg=相对路径` 就是本地插件，CI 会把它改写成容器内路径，Dockerfile 里 `COPY plugins /src/plugins`：
+
+```
+# plugins.txt
+ github.com/ludb68/my_caddy/plugins/ipunion=plugins/ipunion
+   ↓ CI 改写
+ --with github.com/ludb68/my_caddy/plugins/ipunion=/src/plugins/ipunion
+```
 
 ## 兼容性验证（本地实跑，非推测）
 
 ```
 $ xcaddy build v2.11.7 --with ...(上表三个插件)
 $ caddy version      → v2.11.7 h1:yj0Y4fYZGPkSvibBJ1sTWE33xC0fxztVyXEW5iIdUT4=
-$ caddy list-modules → 143 个模块，含：
+$ caddy list-modules → 含：
     dns.providers.cloudflare
     http.handlers.rate_limit
     http.ip_sources.cloudflare
-$ caddy adapt  → "trusted_proxies":{"interval":21600000000,"source":"cloudflare","timeout":10000000000}
+    http.ip_sources.union          ← 本仓库 plugins/ipunion（刚加的）
+$ caddy adapt  → "trusted_proxies":{"source":"union","sources":[{"source":"cloudflare","interval":21600000000,"timeout":10000000000},{"source":"static","ranges":["192.168.0.0/16","172.16.0.0/12","10.0.0.0/8","127.0.0.1/8","fd00::/8","::1"]}]}
 $ caddy validate → Valid configuration
 # 顺带实测：`order rate_limit before basicauth` + rate_limit 块、`@not_cf not client_ip <cidrs...>` 均可 adapt
 ```

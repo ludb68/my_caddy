@@ -88,6 +88,16 @@ jobs:
           fi
           [ -n "$plugins" ] || { echo "::error::插件列表为空"; exit 1; }
 
+          # 3.5) 本地插件改写：pkg=相对路径 → pkg=/src/相对路径（Dockerfile 里 COPY plugins /src/plugins）
+          mapped=""
+          for p in $plugins; do
+            case "$p" in
+              *=*) left="${p%%=*}"; right="${p#*=}"; mapped="$mapped $left=/src/${right#/}" ;;
+              *)   mapped="$mapped $p" ;;
+            esac
+          done
+          plugins="$(printf '%s' "$mapped" | sed -E 's/^ +//')"
+
           # 4) 是否推送：PR 一律不推
           push="true"
           case "$EVENT" in
@@ -220,7 +230,7 @@ jobs:
       - name: 断言插件模块已编进去
         env:
           # 期望存在的模块 ID 列表；想改就在仓库 Variables 里建 EXPECT_MODULES
-          EXPECT: ${{ vars.EXPECT_MODULES || 'dns.providers.cloudflare http.ip_sources.cloudflare http.handlers.rate_limit' }}
+          EXPECT: ${{ vars.EXPECT_MODULES || 'dns.providers.cloudflare http.ip_sources.cloudflare http.ip_sources.union http.handlers.rate_limit' }}
         run: |
           set -euo pipefail
           docker run --rm "$IMAGE" caddy version

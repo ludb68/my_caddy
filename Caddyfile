@@ -1,29 +1,39 @@
 {
 	# ===============================================================
-	# 真实访客 IP：插件 github.com/WeidiDeng/caddy-cloudflare-ip
-	#  模块 ID = http.ip_sources.cloudflare
-	#  定期拉取 https://www.cloudflare.com/ips-v4 和 ips-v6
-	#  配好后 {http.request.remote} / client_ip 拿到的就是 CF 透传的真实 IP
-	#  Caddyfile 语法：servers { trusted_proxies <模块名> { ... } }
+	# 真实访客 IP：两个来源合并成一个 trusted_proxies
+	#   ① Cloudflare 官方段：插件 WeidiDeng/caddy-cloudflare-ip（模块 http.ip_sources.cloudflare）
+	#      定期拉取 https://www.cloudflare.com/ips-v4 和 ips-v6
+	#   ② 局域网/容器网段：内置模块 http.ip_sources.union（本仓库 plugins/ipunion）+ static private_ranges
+	# 为什么要并：Caddy 的 trusted_proxies 是单源字段（内联 key=source），一个 server 只能配一个源。
+	#   Swarm ingress / 前置反代会把 peer IP 变成 10.0.0.2，只信任 CF 段的话会判定不可信 → 真实 IP 丢失。
 	# ===============================================================
 	servers {
-		trusted_proxies cloudflare {
-			interval 6h
-			timeout 10s
+		trusted_proxies union {
+			# ① CF 官方段（动态）
+			source cloudflare {
+				interval 6h
+				timeout 10s
+			}
+			# ② 内网段（静态）：private_ranges = 10.0.0.0/8 + 172.16.0.0/12 + 192.168.0.0/16
+			#    + 127.0.0.1/8 + fd00::/8 + ::1（注意：Docker 默认桥接 172.17/16 也在 172.16/12 里）
+			#    只想要 10.x 就写成：source static 10.0.0.0/8
+			source static private_ranges
 		}
-		# 直连源站时不要把 XFF 当真实 IP（可选，开了更严格）
+
+		# 信任了内网段 = 内网任何东西都能伪造 X-Forwarded-For，建议开 strict：
+		# 开了之后 Caddy 会要求 XFF 链路严格可回退，伪造会直接忽略/报错。
 		# trusted_proxies_strict
 
-		# ---------------------------------------------------------------
-		# ⚠ 一个 server 只能配一个 trusted_proxies 源（single IPRangeSource）。
-		# 如果 Caddy 前面还有一层代理（Docker Swarm ingress 会把回源源 IP
-		# 变成 10.0.0.2），那 peer IP 不在 CF 段里 → 上面的 cloudflare 源
-		# 会判定「不可信」，真实 IP 又丢了。两种解法：
-		#   ① 用 host 模式发布端口（Swarm 里 mode: host），保住真实源 IP：
-		#      ports: [{ target: 443, published: 443, mode: host }]
-		#   ② 改用 static 并集（CF 段 + 内网段），列表必须写在同一行：
-		# trusted_proxies static 10.0.0.0/8 173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 141.101.64.0/18 108.162.192.0/18 190.93.240.0/20 188.114.96.0/20 197.234.240.0/22 198.41.128.0/17 162.158.0.0/15 104.16.0.0/13 104.24.0.0/14 172.64.0.0/13 131.0.72.0/22 2400:cb00::/32 2606:4700::/32 2803:f800::/32 2405:b500::/32 2405:8100::/32 2a06:98c0::/29 2c0f:f248::/32
-		# ---------------------------------------------------------------
+		# ---- 备选写法 ----
+		# 只要 CF（Caddy 直接对外、前面没有 ingress/反代）：
+		# trusted_proxies cloudflare {
+		# 	interval 6h
+		# 	timeout 10s
+		# }
+		# 不想装 CF 插件（全静态，CIDR 必须写在同一行）：
+		# trusted_proxies static private_ranges 173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 141.101.64.0/18 108.162.192.0/18 190.93.240.0/20 188.114.96.0/20 197.234.240.0/22 198.41.128.0/17 162.158.0.0/15 104.16.0.0/13 104.24.0.0/14 172.64.0.0/13 131.0.72.0/22 2400:cb00::/32 2606:4700::/32 2803:f800::/32 2405:b500::/32 2405:8100::/32 2a06:98c0::/29 2c0f:f248::/32
+		# 拓扑改一下（Swarm 用 host 模式发布端口 → peer IP 就是 CF 节点，只需信任 CF）：
+		# ports: [{ target: 443, published: 443, mode: host }]
 	}
 
 	# 日志默认 stdout，docker logs 直接看
