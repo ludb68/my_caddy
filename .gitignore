@@ -1,0 +1,10 @@
+_verify/
+caddy
+caddy.exe
+modules.txt
+.idea/
+*.iml
+
+# 凭据：只留 *.example 模板，真实文件不提交
+secrets/*.env
+!secrets/*.env.example

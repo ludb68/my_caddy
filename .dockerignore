@@ -1,0 +1,11 @@
+.git
+.github
+.idea
+*.iml
+_verify
+caddy
+caddy.exe
+*.md
+docker-compose*.yml
+# 凭据绝不进构建上下文
+secrets

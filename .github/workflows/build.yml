@@ -1,0 +1,256 @@
+name: build-caddy
+
+# 触发：
+#  - push 到 main / 打 tag（v*）→ 构建并推送 Docker Hub
+#  - PR → 只构建校验，不推送
+#  - 手动 workflow_dispatch → 可临时指定 Caddy 版本 / 插件 / 是否推送
+#  - 每周一自动重建一次（拿到插件最新代码 + 更新 Caddy）
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      caddy_version:
+        description: 'Caddy 版本（如 2.11.7 / v2.11.7），留空用默认'
+        required: false
+        type: string
+      plugins:
+        description: '插件列表（空格分隔，支持 pkg@ver），留空则用仓库里的 plugins.txt'
+        required: false
+        type: string
+      push_image:
+        description: '构建完成后推送到 Docker Hub'
+        required: true
+        type: boolean
+        default: true
+  schedule:
+    - cron: '0 3 * * 1'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  # 想同时推到 GHCR 再放开这行（并参考 build 里注释的 ghcr 段）
+  # packages: write
+
+env:
+  # 默认 Caddy 版本（想升级只改这里 / 或用手动触发的输入覆盖）
+  DEFAULT_CADDY_VERSION: '2.11.7'
+  # 多架构：不需要 arm64 就删掉，能省一半构建时间
+  PLATFORMS: 'linux/amd64,linux/arm64'
+
+jobs:
+  # -------- 解析参数：镜像名 / Caddy 版本 / 插件列表 / 是否推送 --------
+  prep:
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.prep.outputs.image }}
+      caddy_version: ${{ steps.prep.outputs.caddy_version }}
+      plugins: ${{ steps.prep.outputs.plugins }}
+      push: ${{ steps.prep.outputs.push }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare build args
+        id: prep
+        env:
+          # 仓库 Variables 里配置，如 DOCKERHUB_REPO=youruser/caddy
+          REPO_VAR: ${{ vars.DOCKERHUB_REPO }}
+          OWNER: ${{ github.repository_owner }}
+          EVENT: ${{ github.event_name }}
+          IN_CADDY_VERSION: ${{ inputs.caddy_version }}
+          IN_PLUGINS: ${{ inputs.plugins }}
+          IN_PUSH: ${{ inputs.push_image }}
+          DEFAULT_VERSION: ${{ env.DEFAULT_CADDY_VERSION }}
+        run: |
+          set -euo pipefail
+
+          # 1) 镜像名：仓库变量优先，否则 <owner>/caddy-custom；Docker Hub 要求全小写
+          image="${REPO_VAR:-}"
+          [ -z "$image" ] && image="${OWNER}/caddy-custom"
+          image="$(printf '%s' "$image" | tr '[:upper:]' '[:lower:]')"
+
+          # 2) Caddy 版本
+          ver="${IN_CADDY_VERSION:-}"
+          [ -z "$ver" ] && ver="$DEFAULT_VERSION"
+
+          # 3) 插件列表：手动输入优先，否则读 plugins.txt（去掉注释和空行，空格拼接）
+          plugins="${IN_PLUGINS:-}"
+          if [ -z "$plugins" ]; then
+            plugins="$(grep -vE '^[[:space:]]*(#|$)' plugins.txt \
+              | sed -E 's/[[:space:]]*#.*$//' \
+              | tr '\n' ' ' | tr -s ' ' | sed -E 's/^ +| +$//g')"
+          fi
+          [ -n "$plugins" ] || { echo "::error::插件列表为空"; exit 1; }
+
+          # 4) 是否推送：PR 一律不推
+          push="true"
+          case "$EVENT" in
+            pull_request) push="false" ;;
+            workflow_dispatch) push="${IN_PUSH:-true}" ;;
+          esac
+
+          {
+            echo "image=$image"
+            echo "caddy_version=$ver"
+            echo "plugins=$plugins"
+            echo "push=$push"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### 构建参数"
+            echo ""
+            echo "| 项 | 值 |"
+            echo "| --- | --- |"
+            echo "| 镜像 | \`$image\` |"
+            echo "| Caddy | \`$ver\` |"
+            echo "| 平台 | \`$PLATFORMS\` |"
+            echo "| 推送 | \`$push\` |"
+            echo "| 插件 | \`$plugins\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # -------- 构建多架构镜像并推送到 Docker Hub --------
+  build:
+    needs: prep
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ needs.prep.outputs.image }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=caddy-${{ needs.prep.outputs.caddy_version }},enable={{is_default_branch}}
+            type=ref,event=branch
+            type=ref,event=tag
+            type=sha,format=short,prefix=sha-
+          labels: |
+            org.opencontainers.image.title=Caddy (xcaddy custom)
+            org.opencontainers.image.description=Custom Caddy with Cloudflare dns + trusted-proxies plugins
+
+      - name: Login to Docker Hub
+        if: needs.prep.outputs.push == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # 想同时推 GHCR：放开 permissions.packages 和下面这段
+      # - name: Login to GHCR
+      #   if: needs.prep.outputs.push == 'true'
+      #   uses: docker/login-action@v3
+      #   with:
+      #     registry: ghcr.io
+      #     username: ${{ github.actor }}
+      #     password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ env.PLATFORMS }}
+          push: ${{ needs.prep.outputs.push == 'true' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            CADDY_VERSION=${{ needs.prep.outputs.caddy_version }}
+            CADDY_PLUGINS=${{ needs.prep.outputs.plugins }}
+            VERIFY_MODULES=${{ vars.VERIFY_MODULES || 'cloudflare' }}
+          cache-from: type=gha
+          cache-to: ${{ needs.prep.outputs.push == 'true' && 'type=gha,mode=max' || '' }}
+          # 老版本 docker/containerd 拉 attestation manifest 报错时，改 false
+          provenance: true
+
+      - name: Summary
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          {
+            echo "### 推送结果"
+            echo ""
+            echo '```'
+            echo "$TAGS"
+            echo "digest: $DIGEST"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # -------- 校验：起容器跑 list-modules / validate，并把二进制存成 artifact --------
+  verify:
+    needs: [prep, build]
+    runs-on: ubuntu-latest
+    env:
+      IMAGE: verify-caddy:local
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build amd64 image (load into docker)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          platforms: linux/amd64
+          tags: ${{ env.IMAGE }}
+          build-args: |
+            CADDY_VERSION=${{ needs.prep.outputs.caddy_version }}
+            CADDY_PLUGINS=${{ needs.prep.outputs.plugins }}
+          cache-from: type=gha
+
+      - name: 断言插件模块已编进去
+        env:
+          # 期望存在的模块 ID 列表；想改就在仓库 Variables 里建 EXPECT_MODULES
+          EXPECT: ${{ vars.EXPECT_MODULES || 'dns.providers.cloudflare http.ip_sources.cloudflare http.handlers.rate_limit' }}
+        run: |
+          set -euo pipefail
+          docker run --rm "$IMAGE" caddy version
+          docker run --rm "$IMAGE" caddy list-modules | sort -u > modules.txt
+          echo "模块总数: $(wc -l < modules.txt)"
+          miss=0
+          for m in $EXPECT; do
+            if grep -qx "$m" modules.txt; then echo "OK   $m"; else echo "MISS $m"; miss=1; fi
+          done
+          echo "--- 插件相关模块 ---"
+          grep -E 'cloudflare|ratelimit|rate_limit' modules.txt || true
+          exit $miss
+
+      - name: 校验 Caddyfile 能加载（顺便验证 trusted_proxies cloudflare 生效）
+        run: |
+          docker run --rm -v "$PWD/Caddyfile:/etc/caddy/Caddyfile:ro" "$IMAGE" \
+            caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+
+      - name: 导出二进制 artifact
+        run: |
+          set -euo pipefail
+          cid="$(docker create "$IMAGE")"
+          docker cp "$cid:/usr/bin/caddy" ./caddy-linux-amd64
+          docker rm -f "$cid" >/dev/null
+          chmod +x ./caddy-linux-amd64
+          ./caddy-linux-amd64 version 2>/dev/null || true
+          ls -lh ./caddy-linux-amd64
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: caddy-linux-amd64-v${{ needs.prep.outputs.caddy_version }}
+          path: caddy-linux-amd64
+          retention-days: 14

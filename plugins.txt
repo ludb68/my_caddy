@@ -1,0 +1,15 @@
+# 每行一个插件，支持 pkg 或 pkg@<version|commit|branch>
+# 空行、以 # 开头的行会被忽略；行尾 # 注释也会被去掉
+# 改完这里，Dockerfile / GitHub Action 会自动用它去 xcaddy build，无需改其他文件
+
+# ---- Cloudflare DNS-01：用 CF API Token 签证书（含通配符），不需要 80 端口验证 ----
+github.com/caddy-dns/cloudflare
+
+# ---- Cloudflare 真实客户端 IP：自动把 CF 官方 IP 段同步为 trusted_proxies ----
+# 模块 ID: http.ip_sources.cloudflare
+# 上游 2023-11 之后没再更新，这里用 commit 固定，避免上游变动把构建打挂；
+# Caddy 2.11.x 实测可正常编译 + 生效（见 README「兼容性验证」）
+github.com/WeidiDeng/caddy-cloudflare-ip@f53b62a
+
+# ---- 限流（可选，不需要就删掉这行）----
+github.com/mholt/caddy-ratelimit

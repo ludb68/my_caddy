@@ -1,0 +1,90 @@
+{
+	# ===============================================================
+	# 真实访客 IP：插件 github.com/WeidiDeng/caddy-cloudflare-ip
+	#  模块 ID = http.ip_sources.cloudflare
+	#  定期拉取 https://www.cloudflare.com/ips-v4 和 ips-v6
+	#  配好后 {http.request.remote} / client_ip 拿到的就是 CF 透传的真实 IP
+	#  Caddyfile 语法：servers { trusted_proxies <模块名> { ... } }
+	# ===============================================================
+	servers {
+		trusted_proxies cloudflare {
+			interval 6h
+			timeout 10s
+		}
+		# 直连源站时不要把 XFF 当真实 IP（可选，开了更严格）
+		# trusted_proxies_strict
+
+		# ---------------------------------------------------------------
+		# ⚠ 一个 server 只能配一个 trusted_proxies 源（single IPRangeSource）。
+		# 如果 Caddy 前面还有一层代理（Docker Swarm ingress 会把回源源 IP
+		# 变成 10.0.0.2），那 peer IP 不在 CF 段里 → 上面的 cloudflare 源
+		# 会判定「不可信」，真实 IP 又丢了。两种解法：
+		#   ① 用 host 模式发布端口（Swarm 里 mode: host），保住真实源 IP：
+		#      ports: [{ target: 443, published: 443, mode: host }]
+		#   ② 改用 static 并集（CF 段 + 内网段），列表必须写在同一行：
+		# trusted_proxies static 10.0.0.0/8 173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 141.101.64.0/18 108.162.192.0/18 190.93.240.0/20 188.114.96.0/20 197.234.240.0/22 198.41.128.0/17 162.158.0.0/15 104.16.0.0/13 104.24.0.0/14 172.64.0.0/13 131.0.72.0/22 2400:cb00::/32 2606:4700::/32 2803:f800::/32 2405:b500::/32 2405:8100::/32 2a06:98c0::/29 2c0f:f248::/32
+		# ---------------------------------------------------------------
+	}
+
+	# 日志默认 stdout，docker logs 直接看
+	log {
+		output stdout
+		format json
+	}
+	# 要落盘（Dockerfile 已建好 /var/log/caddy，权限 1777）：
+	# log {
+	# 	output file /var/log/caddy/access.log {
+	# 		roll_size 20MiB
+	# 		roll_keep 5
+	# 		roll_keep_for 168h
+	# 	}
+	# }
+
+	# 需要 rate_limit 指令时放开（插件 github.com/mholt/caddy-ratelimit）
+	# order rate_limit before basicauth
+}
+
+# ---------------------------------------------------------------
+# 默认站点：容器起来就能跑，不依赖域名/证书
+# ---------------------------------------------------------------
+:80 {
+	respond /healthz "ok" 200
+	respond "caddy-custom is up | client_ip={http.request.remote.host}" 200
+}
+
+# ---------------------------------------------------------------
+# 正式站点示例：改成你的域名后取消注释即可
+#   - 证书用 Cloudflare DNS-01（通配符，不需要暴露 80 端口给别人验证）
+#   - CF_API_TOKEN 从环境变量注入：docker run -e CF_API_TOKEN=xxx
+# ---------------------------------------------------------------
+# your-domain.com, *.your-domain.com {
+# 	encode zstd gzip
+#
+# 	tls {
+# 		dns cloudflare {env.CF_API_TOKEN}
+# 	}
+#
+# 	header {
+# 		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+# 		X-Content-Type-Options "nosniff"
+# 		-Server
+# 	}
+#
+# 	# 只允许 CF 回源：静态写死 CF 段（client_ip / remote_ip 不支持动态模块名，也不支持块语法，
+# 	# 所有 CIDR 必须跟在同一个 matcher 行里）
+# 	# @not_cf not client_ip 173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 141.101.64.0/18 108.162.192.0/18 190.93.240.0/20 188.114.96.0/20 197.234.240.0/22 198.41.128.0/17 162.158.0.0/15 104.16.0.0/13 104.24.0.0/14 172.64.0.0/13 131.0.72.0/22 2400:cb00::/32 2606:4700::/32 2803:f800::/32 2405:b500::/32 2405:8100::/32 2a06:98c0::/29 2c0f:f248::/32
+# 	# respond @not_cf "direct access denied" 403
+#
+# 	# 限流（caddy-ratelimit）
+# 	# rate_limit {
+# 	# 	zone dynamic {
+# 	# 		key {http.request.remote.host}
+# 	# 		events 100
+# 	# 		window 1m
+# 	# 	}
+# 	# }
+#
+# 	reverse_proxy 127.0.0.1:8080 {
+# 		header_up X-Real-IP {http.request.remote.host}
+# 	}
+# }
